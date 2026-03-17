@@ -19,7 +19,7 @@ public class FileCopyCommand : FileCommand
 
     private static string Quote(string path)
     {
-        if (!path.Contains(' ') && !path.Contains('"') && !path.Contains('\\'))
+        if (!path.Contains(" ") && !path.Contains("\"") && !path.Contains("\\"))
             return path;
         return "\"" + path.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
