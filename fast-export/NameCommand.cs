@@ -19,7 +19,7 @@ public abstract class NameCommand : Command
 
     private static long ToUnixTimestamp(DateTimeOffset dt)
     {
-        return (long)(dt.ToUniversalTime() - DateTimeOffset.UnixEpoch).TotalSeconds;
+        return (long)(dt.ToUniversalTime() - new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero)).TotalSeconds;
     }
 
     public override void RenderCommand(Stream stream)

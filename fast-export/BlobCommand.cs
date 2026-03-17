@@ -11,7 +11,8 @@ public class BlobCommand : MarkCommand
 
     public static BlobCommand BuildBlob(byte[] data, int? markId)
     {
-        var hash = Convert.ToHexString(SHA1.HashData(data));
+        using var sha1 = SHA1.Create();
+        var hash = BitConverter.ToString(sha1.ComputeHash(data)).Replace("-", "");
         if (_DataBlobs.TryGetValue(hash, out var existing))
         {
             if (existing.DataCommand._Bytes.Length != data.Length)

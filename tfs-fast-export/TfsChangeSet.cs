@@ -212,7 +212,13 @@ public class TfsChangeSet
     {
         var bytes = new byte[item.ContentLength];
         using var stream = item.DownloadFile();
-        stream.ReadExactly(bytes);
+        int totalRead = 0;
+        while (totalRead < bytes.Length)
+        {
+            int read = stream.Read(bytes, totalRead, bytes.Length - totalRead);
+            if (read == 0) throw new EndOfStreamException($"Unexpected end of stream reading item {item.ServerItem}");
+            totalRead += read;
+        }
         return BlobCommand.BuildBlob(bytes, _MarkID++);
     }
 
