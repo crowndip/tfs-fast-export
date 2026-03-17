@@ -1,271 +1,315 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.DirectoryServices.AccountManagement;
-using System.DirectoryServices.ActiveDirectory;
-using System.DirectoryServices.Protocols;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
-using Microsoft.TeamFoundation;
 using Microsoft.TeamFoundation.Client;
-using Microsoft.TeamFoundation.Framework;
 using Microsoft.TeamFoundation.VersionControl.Client;
 
 using fast_export;
 
-namespace tfs_fast_export
+namespace tfs_fast_export;
+
+public class TfsChangeSet
 {
-	public class TfsChangeSet
-	{
-		private static Dictionary<string, Tuple<string, CommitCommand>> _Branches = new Dictionary<string, Tuple<string, CommitCommand>>();
-		private static Dictionary<int, CommitCommand> _Commits = new Dictionary<int, CommitCommand>();
+    private static Dictionary<string, Tuple<string, CommitCommand?>> _Branches = new();
+    private static Dictionary<int, CommitCommand> _Commits = new();
+    private static VersionControlServer _VersionControlServer = null!;
+    private static string _TfsRootPath = "";
 
-		private Changeset _ChangeSet;
-		public TfsChangeSet(Changeset changeSet)
-		{
-			_ChangeSet = changeSet;
-			@this = this;
-		}
+    private Changeset _ChangeSet;
 
-		// FYI this whole thing is entirely not thread-safe.
-		private static TfsChangeSet @this;
-		private static Dictionary<int, Func<CommitCommand>> _SpecialCommands = new Dictionary<int, Func<CommitCommand>>()
-		{
-			// use this to do checkin specific actions;  one example is when a branch itself changes name
-			{ 12345, () =>
-				{
-					_Branches["$/Branch-A/"] = _Branches["$/Branch-B/"];
-					_Branches.Remove("$/Branch-A/");
-					return null;
-				} },
-		};
-		public CommitCommand ProcessChangeSet()
-		{
-			if (_SpecialCommands.ContainsKey(_ChangeSet.ChangesetId))
-				return _SpecialCommands[_ChangeSet.ChangesetId]();
-			return DoProcessChangeSet();
-		}
+    public static void Initialize(string tfsRootPath, VersionControlServer vcs)
+    {
+        _TfsRootPath = tfsRootPath;
+        _VersionControlServer = vcs;
+    }
 
-		private List<FileCommand> fileCommands = new List<FileCommand>();
-		private List<CommitCommand> merges = new List<CommitCommand>();
-		private string branch = null;
-		private Func<Change, bool> _WhereClause = (x) => true;
-		private CommitCommand DoProcessChangeSet()
-		{
-			var committer = new CommitterCommand(_ChangeSet.Committer, GetEmailAddressForUser(_ChangeSet.Committer), _ChangeSet.CreationDate);
-			var author = _ChangeSet.Committer != _ChangeSet.Owner ? new AuthorCommand(_ChangeSet.Owner, GetEmailAddressForUser(_ChangeSet.Owner), _ChangeSet.CreationDate) : null;
+    public TfsChangeSet(Changeset changeSet)
+    {
+        _ChangeSet = changeSet;
+    }
 
-			var orderedChanges = _ChangeSet.Changes
-				.Where(_WhereClause)
-				.Select((x, i) => new { x, i })
-				.OrderBy(z => z.x.ChangeType)
-				.ThenBy(z => z.i)
-				.Select(z => z.x)
-				.ToList();
-			var deleteBranch = false;
-			foreach (var change in orderedChanges)
-			{
-				var path = GetPath(change.Item.ServerItem);
-				if (path == null)
-					continue;
+    private static Dictionary<int, Func<CommitCommand?>> _SpecialCommands = new()
+    {
+        // use this to do checkin specific actions; one example is when a branch itself changes name
+        { 12345, () =>
+            {
+                _Branches["$/Branch-A/"] = _Branches["$/Branch-B/"];
+                _Branches.Remove("$/Branch-A/");
+                return null;
+            } },
+    };
 
-				// we delete before we check folders in case we can delete
-				// an entire subdir w/ one command instead of file by file
-				if ((change.ChangeType & ChangeType.Delete) == ChangeType.Delete)
-				{
-					fileCommands.Add(new FileDeleteCommand(path));
-					if (path == "")
-					{
-						deleteBranch = true;
-						break;
-					}
-					continue;
-				}
+    public CommitCommand? ProcessChangeSet()
+    {
+        if (_SpecialCommands.ContainsKey(_ChangeSet.ChangesetId))
+            return _SpecialCommands[_ChangeSet.ChangesetId]();
+        return DoProcessChangeSet();
+    }
 
-				if (change.Item.ItemType == ItemType.Folder)
-					continue;
+    private List<FileCommand> fileCommands = new();
+    private List<CommitCommand> merges = new();
+    private string? branch = null;
 
-				if ((change.ChangeType & ChangeType.Rename) == ChangeType.Rename)
-				{
-					var vcs = change.Item.VersionControlServer;
-					var history = vcs
-						.QueryHistory(
-							change.Item.ServerItem,
-							new ChangesetVersionSpec(_ChangeSet.ChangesetId),
-							change.Item.DeletionId,
-							RecursionType.None,
-							null,
-							null,
-							new ChangesetVersionSpec(_ChangeSet.ChangesetId),
-							int.MaxValue,
-							true,
-							false)
-						.OfType<Changeset>()
-						.ToList();
+    private CommitCommand? DoProcessChangeSet()
+    {
+        var committer = new CommitterCommand(_ChangeSet.Committer, GetEmailAddressForUser(_ChangeSet.Committer), _ChangeSet.CreationDate);
+        var author = _ChangeSet.Committer != _ChangeSet.Owner
+            ? new AuthorCommand(_ChangeSet.Owner, GetEmailAddressForUser(_ChangeSet.Owner), _ChangeSet.CreationDate)
+            : null;
 
-					var previousChangeset = history[1];
-					var previousFile = previousChangeset.Changes[0];
-					var previousPath = GetPath(previousFile.Item.ServerItem);
-					fileCommands.Add(new FileRenameCommand(previousPath, path));
+        // Issue #1: QueryHistory with includeChanges:true truncates Changes server-side
+        // (often at ~2000 items). GetChangesForChangeset always returns all changes.
+        var allChanges = _VersionControlServer
+            .GetChangesForChangeset(_ChangeSet.ChangesetId, true, int.MaxValue, null)
+            .Where(c => c.Item.ServerItem.StartsWith(_TfsRootPath))
+            .ToList();
 
-					// remove delete commands, since rename will take care of biz
-					fileCommands.RemoveAll(fc => fc is FileDeleteCommand && fc.Path == previousPath);
-				}
+        // Issue #7: ChangeType.Add=1, ChangeType.Delete=16, so ascending sort puts adds
+        // first — the opposite of the intended order. Sort deletes to the front explicitly.
+        var orderedChanges = allChanges
+            .Select((x, i) => new { x, i })
+            .OrderBy(z => (z.x.ChangeType & ChangeType.Delete) != 0 ? 0 : 1)
+            .ThenBy(z => z.i)
+            .Select(z => z.x)
+            .ToList();
 
-				var blob = GetDataBlob(change.Item);
-				fileCommands.Add(new FileModifyCommand(path, blob));
+        var deleteBranch = false;
+        foreach (var change in orderedChanges)
+        {
+            var path = GetPath(change.Item.ServerItem);
+            if (path == null)
+                continue;
 
-				if ((change.ChangeType & ChangeType.Branch) == ChangeType.Branch)
-				{
-					var vcs = change.Item.VersionControlServer;
-					var history = vcs.GetBranchHistory(new[] { new ItemSpec(change.Item.ServerItem, RecursionType.None) }, new ChangesetVersionSpec(_ChangeSet.ChangesetId));
+            // delete before checking folders; allows deleting an entire subdir with one command
+            if ((change.ChangeType & ChangeType.Delete) == ChangeType.Delete)
+            {
+                fileCommands.Add(new FileDeleteCommand(path));
+                if (path == "")
+                {
+                    deleteBranch = true;
+                    break;
+                }
+                continue;
+            }
 
-					var itemHistory = history[0][0];
-					var mergedItem = FindMergedItem(itemHistory, _ChangeSet.ChangesetId);
-					var branchInfo = GetBranch(mergedItem.Relative.BranchFromItem.ServerItem).Item2;
-					var previousCommit = branchInfo.Item2;
-					if (!merges.Contains(previousCommit))
-						merges.Add(previousCommit);
-				}
+            if (change.Item.ItemType == ItemType.Folder)
+                continue;
 
-				if ((change.ChangeType & ChangeType.Merge) == ChangeType.Merge)
-				{
-					var vcs = change.Item.VersionControlServer;
-					var mergeHistory = vcs.QueryMergesExtended(new ItemSpec(change.Item.ServerItem, RecursionType.None), new ChangesetVersionSpec(_ChangeSet.ChangesetId), null, new ChangesetVersionSpec(_ChangeSet.ChangesetId)).ToList();
-					foreach (var mh in mergeHistory)
-					{
-						var branchInfo = GetBranch(mh.SourceItem.Item.ServerItem).Item2;
-						var previousCommit = branchInfo.Item2;
-						if (!merges.Contains(previousCommit))
-							merges.Add(previousCommit);
-					}
-				}
-			}
+            if ((change.ChangeType & ChangeType.Rename) == ChangeType.Rename)
+            {
+                var history = _VersionControlServer
+                    .QueryHistory(
+                        change.Item.ServerItem,
+                        new ChangesetVersionSpec(_ChangeSet.ChangesetId),
+                        change.Item.DeletionId,
+                        RecursionType.None,
+                        null,
+                        null,
+                        new ChangesetVersionSpec(_ChangeSet.ChangesetId),
+                        int.MaxValue,
+                        true,
+                        false)
+                    .OfType<Changeset>()
+                    .ToList();
 
-			var reference = _Branches[branch];
-			var commit = new CommitCommand(
-				markId: _ChangeSet.ChangesetId,
-				reference: reference.Item1,
-				committer: committer,
-				author: author,
-				commitInfo: new DataCommand(_ChangeSet.Comment),
-				fromCommit: reference.Item2,
-				mergeCommits: merges,
-				fileCommands: fileCommands);
-			_Commits[_ChangeSet.ChangesetId] = commit;
+                // Issue #3: history may have only one entry for a Branch|Rename in a single
+                // changeset. Guard before indexing.
+                if (history.Count >= 2)
+                {
+                    var previousChangeset = history[1];
+                    // Issue #6: Changes[0] is not guaranteed to be this specific item.
+                    // Match by ItemId, which persists across renames.
+                    var previousFile =
+                        previousChangeset.Changes.FirstOrDefault(c => c.Item.ItemId == change.Item.ItemId)
+                        ?? previousChangeset.Changes[0];
+                    var previousPath = GetPath(previousFile.Item.ServerItem);
+                    fileCommands.Add(new FileRenameCommand(previousPath!, path));
 
-			if (deleteBranch)
-				_Branches.Remove(branch);
-			else
-				_Branches[branch] = Tuple.Create(reference.Item1, commit);
+                    // remove delete commands, since rename will take care of it
+                    fileCommands.RemoveAll(fc => fc is FileDeleteCommand && fc.Path == previousPath);
+                }
+                // If history.Count < 2 fall through to FileModifyCommand below:
+                // file content is exported correctly even though rename lineage is lost.
+            }
 
-			return commit;
-		}
+            var blob = GetDataBlob(change.Item);
+            fileCommands.Add(new FileModifyCommand(path, blob));
 
-		// 10,000,000 to get it out of way of normal checkins
-		private static int _MarkID = 10000001;
-		private BlobCommand GetDataBlob(Item item)
-		{
-			var bytes = new byte[item.ContentLength];
-			var str = item.DownloadFile();
-			str.Read(bytes, 0, bytes.Length);
-			str.Close();
+            if ((change.ChangeType & ChangeType.Branch) == ChangeType.Branch)
+            {
+                var history = _VersionControlServer.GetBranchHistory(
+                    new[] { new ItemSpec(change.Item.ServerItem, RecursionType.None) },
+                    new ChangesetVersionSpec(_ChangeSet.ChangesetId));
 
-			var id = _MarkID++;
-			var blob = BlobCommand.BuildBlob(bytes, id);
-			return blob;
-		}
+                var itemHistory = history[0][0];
+                var mergedItem = FindMergedItem(itemHistory, _ChangeSet.ChangesetId);
 
-		private static BranchHistoryTreeItem FindMergedItem(BranchHistoryTreeItem parent, int changeSetId)
-		{
-			foreach (BranchHistoryTreeItem item in parent.Children)
-			{
-				if (item.Relative.IsRequestedItem)
-					return item;
+                // Issues #4 & #5: mergedItem or branchInfo can be null.
+                if (mergedItem != null)
+                {
+                    var branchInfo = GetBranch(mergedItem.Relative.BranchFromItem.ServerItem);
+                    var previousCommit = branchInfo?.Item2.Item2;
+                    if (previousCommit != null && !merges.Contains(previousCommit))
+                        merges.Add(previousCommit);
+                }
+            }
 
-				var x = FindMergedItem(item, changeSetId);
-				if (x != null)
-					return x;
-			}
-			return null;
-		}
+            if ((change.ChangeType & ChangeType.Merge) == ChangeType.Merge)
+            {
+                var mergeHistory = _VersionControlServer.QueryMergesExtended(
+                    new ItemSpec(change.Item.ServerItem, RecursionType.None),
+                    new ChangesetVersionSpec(_ChangeSet.ChangesetId),
+                    null,
+                    new ChangesetVersionSpec(_ChangeSet.ChangesetId)).ToList();
 
-		private Tuple<string, Tuple<string, CommitCommand>> GetBranch(string serverPath)
-		{
-			foreach (var x in _Branches)
-				if (serverPath.StartsWith(x.Key))
-					return Tuple.Create(x.Key, x.Value);
-			return null;
-		}
+                foreach (var mh in mergeHistory)
+                {
+                    // Issue #9: use the specific source changeset commit rather than the
+                    // branch HEAD. Fall back to branch HEAD when the source is outside scope.
+                    if (!_Commits.TryGetValue(mh.SourceItem.ChangesetId, out var sourceCommit))
+                    {
+                        var branchInfo = GetBranch(mh.SourceItem.Item.ServerItem);
+                        sourceCommit = branchInfo?.Item2.Item2;
+                    }
+                    if (sourceCommit != null && !merges.Contains(sourceCommit))
+                        merges.Add(sourceCommit);
+                }
+            }
+        }
 
-		private string GetPath(string serverPath)
-		{
-			if (branch == null)
-			{
-				var branchInfo = GetBranch(serverPath);
-				if (branchInfo == null)
-				{
-					CreateNewBranch(serverPath);
-					return "";
-				}
-				else
-					branch = branchInfo.Item1;
-			}
+        // Issue #2: if every change was a folder (ItemType.Folder → continue), branch is
+        // never set. Nothing to commit for folder-only changesets.
+        if (branch == null)
+            return null;
 
-			if (!serverPath.StartsWith(branch))
-				// for now ignore secondary branches and hope that other filemodify commands work this stuff out
-				return null;
+        var reference = _Branches[branch];
+        var commit = new CommitCommand(
+            markId: _ChangeSet.ChangesetId,
+            reference: reference.Item1,
+            committer: committer,
+            author: author,
+            commitInfo: new DataCommand(_ChangeSet.Comment),
+            fromCommit: reference.Item2,
+            mergeCommits: merges,
+            fileCommands: fileCommands);
+        _Commits[_ChangeSet.ChangesetId] = commit;
 
-			return serverPath.Replace(branch, "");
-		}
+        if (deleteBranch)
+            _Branches.Remove(branch);
+        else
+            _Branches[branch] = Tuple.Create(reference.Item1, (CommitCommand?)commit);
 
-		private void CreateNewBranch(string serverPath)
-		{
-			// Assumes that main directory for branch is the first thing added in new branch
-			branch = serverPath + "/";
+        return commit;
+    }
 
-			if (!_Branches.ContainsKey(branch))
-			{
-				_Branches[branch] = Tuple.Create(string.Format("refs/heads/{0}", Path.GetFileName(serverPath)), default(CommitCommand));
-				fileCommands.Add(new FileDeleteAllCommand());
-			}
-		}
+    // 10,000,000 to get it out of the way of normal checkins
+    private static int _MarkID = 10000001;
 
-		#region Active Directory
-		private static string ProcessADName(string adName)
-		{
-			if (string.IsNullOrEmpty(adName))
-				return "";
+    private BlobCommand GetDataBlob(Item item)
+    {
+        var bytes = new byte[item.ContentLength];
+        using var stream = item.DownloadFile();
+        stream.ReadExactly(bytes);
+        return BlobCommand.BuildBlob(bytes, _MarkID++);
+    }
 
-			if (!adName.Contains('\\'))
-				return adName;
+    private static BranchHistoryTreeItem? FindMergedItem(BranchHistoryTreeItem parent, int changeSetId)
+    {
+        foreach (BranchHistoryTreeItem item in parent.Children)
+        {
+            if (item.Relative.IsRequestedItem)
+                return item;
 
-			var split = adName.Split('\\');
-			return split[1];
-		}
+            var x = FindMergedItem(item, changeSetId);
+            if (x != null)
+                return x;
+        }
+        return null;
+    }
 
-		private static UserPrincipal GetUserPrincipal(string userName)
-		{
-			var domainContext = new PrincipalContext(ContextType.Domain);
-			var user = UserPrincipal.FindByIdentity(domainContext, IdentityType.SamAccountName, ProcessADName(userName));
-			if (user != null)
-				return user;
-			throw new InvalidOperationException(string.Format("Cannot find current user ({0}) in any domains.", userName));
-		}
+    private Tuple<string, Tuple<string, CommitCommand?>>? GetBranch(string serverPath)
+    {
+        foreach (var x in _Branches)
+            if (serverPath.StartsWith(x.Key))
+                return Tuple.Create(x.Key, x.Value);
+        return null;
+    }
 
-		private static string GetEmailAddressForUser(string userName)
-		{
-			try
-			{
-				return GetUserPrincipal(userName).EmailAddress;
-			}
-			catch
-			{
-				return "no.user@example.com";
-			}
-		}
-		#endregion
-	}
+    private string? GetPath(string serverPath)
+    {
+        if (branch == null)
+        {
+            var branchInfo = GetBranch(serverPath);
+            if (branchInfo == null)
+            {
+                CreateNewBranch(serverPath);
+                return "";
+            }
+            else
+                branch = branchInfo.Item1;
+        }
+
+        if (!serverPath.StartsWith(branch))
+            // for now ignore secondary branches; other filemodify commands handle this
+            return null;
+
+        // Issue #10: use Substring instead of Replace to avoid replacing all occurrences.
+        return serverPath.Substring(branch.Length);
+    }
+
+    private void CreateNewBranch(string serverPath)
+    {
+        // TFS normally sends the branch root folder before its files. If a file arrives
+        // first (Issue #8), strip the filename to recover the branch root directory.
+        // "$/Proj/Branch/file.cs" → lastSlash=17 > 1 → "$/Proj/Branch/"
+        // "$/Branch"              → lastSlash=1  ≤ 1 → "$/Branch/"
+        int lastSlash = serverPath.LastIndexOf('/');
+        branch = lastSlash > 1
+            ? serverPath.Substring(0, lastSlash + 1)
+            : serverPath + "/";
+
+        if (!_Branches.ContainsKey(branch))
+        {
+            _Branches[branch] = Tuple.Create($"refs/heads/{Path.GetFileName(branch.TrimEnd('/'))}", default(CommitCommand));
+            fileCommands.Add(new FileDeleteAllCommand());
+        }
+    }
+
+    #region Active Directory
+    private static string ProcessADName(string adName)
+    {
+        if (string.IsNullOrEmpty(adName))
+            return "";
+
+        if (!adName.Contains('\\'))
+            return adName;
+
+        var split = adName.Split('\\');
+        return split[1];
+    }
+
+    private static UserPrincipal GetUserPrincipal(string userName)
+    {
+        var domainContext = new PrincipalContext(ContextType.Domain);
+        var user = UserPrincipal.FindByIdentity(domainContext, IdentityType.SamAccountName, ProcessADName(userName));
+        if (user != null)
+            return user;
+        throw new InvalidOperationException($"Cannot find current user ({userName}) in any domains.");
+    }
+
+    private static string GetEmailAddressForUser(string userName)
+    {
+        try
+        {
+            return GetUserPrincipal(userName).EmailAddress ?? "no.user@example.com";
+        }
+        catch
+        {
+            return "no.user@example.com";
+        }
+    }
+    #endregion
 }

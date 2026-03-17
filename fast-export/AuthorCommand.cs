@@ -1,19 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System;
 
-namespace fast_export
+namespace fast_export;
+
+public class AuthorCommand : NameCommand
 {
-	public class AuthorCommand : NameCommand
-	{
-		public override string CommandName
-		{
-			get { return "author"; }
-		}
+    public override string CommandName => "author";
 
-		public AuthorCommand(string name, string email, DateTimeOffset date)
-			: base(name, email, date) { }
-	}
+    public AuthorCommand(string name, string email, DateTimeOffset date)
+        : base(name, email, date) { }
 }

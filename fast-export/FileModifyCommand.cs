@@ -1,42 +1,37 @@
-﻿using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
-namespace fast_export
+namespace fast_export;
+
+public class FileModifyCommand : FileCommand
 {
-	public class FileModifyCommand : FileCommand
-	{
-		public BlobCommand Blob { get; private set; }
-		public FileModifyCommand(string path, BlobCommand blob)
-		{
-			base.Path = path;
-			this.Blob = blob;
-		}
+    public BlobCommand? Blob { get; private set; }
+    public DataCommand? Data { get; private set; }
 
-		public DataCommand Data { get; private set; }
-		public FileModifyCommand(string path, byte[] data)
-		{
-			base.Path = path;
-			this.Data = new DataCommand(data);
-		}
+    public FileModifyCommand(string path, BlobCommand blob)
+    {
+        base.Path = path;
+        this.Blob = blob;
+    }
 
-		public override void RenderCommand(Stream stream)
-		{
-			if (Blob != null)
-			{
-				stream.WriteString("M 644 ");
-				Blob.RenderMarkReference(stream);
-				stream.WriteString(" " + Path);
-				stream.WriteLineFeed();
-			}
-			else
-			{
-				stream.WriteLine(string.Format("M 644 inline {0}", Path));
-				stream.RenderCommand(Data);
-			}
-		}
-	}
+    public FileModifyCommand(string path, byte[] data)
+    {
+        base.Path = path;
+        this.Data = new DataCommand(data);
+    }
+
+    public override void RenderCommand(Stream stream)
+    {
+        if (Blob != null)
+        {
+            stream.WriteString("M 644 ");
+            Blob.RenderMarkReference(stream);
+            stream.WriteString(" " + Path);
+            stream.WriteLineFeed();
+        }
+        else
+        {
+            stream.WriteLine($"M 644 inline {Path}");
+            stream.RenderCommand(Data!);
+        }
+    }
 }
