@@ -13,7 +13,12 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.TeamFoundationServer.ExtendedClient" Version="20.256.2" />
-    <!-- System.DirectoryServices.AccountManagement ships in-box with .NET Framework -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.DirectoryServices.AccountManagement ships in-box with .NET Framework
+         but must be explicitly referenced in SDK-style projects -->
+    <Reference Include="System.DirectoryServices.AccountManagement" />
   </ItemGroup>
 
   <ItemGroup>

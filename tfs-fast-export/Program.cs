@@ -65,9 +65,7 @@ class Program
             }
 
             var networkCred = new NetworkCredential(username, password, domain);
-            var tfsCred = new TfsClientCredentials(new WindowsCredential(networkCred));
-            tfsCred.AllowInteractive = false;
-            collection = new TfsTeamProjectCollection(new Uri(collectionUrl), tfsCred);
+            collection = new TfsTeamProjectCollection(new Uri(collectionUrl), networkCred);
         }
         else
         {
