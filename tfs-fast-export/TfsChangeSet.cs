@@ -86,12 +86,16 @@ public class TfsChangeSet
             // delete before checking folders; allows deleting an entire subdir with one command
             if ((change.ChangeType & ChangeType.Delete) == ChangeType.Delete)
             {
-                fileCommands.Add(new FileDeleteCommand(path));
                 if (path == "")
                 {
+                    // Bug A: FileDeleteCommand("") would emit "D " which is invalid in
+                    // git fast-import. Deleting the branch root means all files are gone;
+                    // use deleteall to wipe the tree correctly.
+                    fileCommands.Add(new FileDeleteAllCommand());
                     deleteBranch = true;
                     break;
                 }
+                fileCommands.Add(new FileDeleteCommand(path));
                 continue;
             }
 
@@ -126,12 +130,26 @@ public class TfsChangeSet
                         previousChangeset.Changes.FirstOrDefault(c => c.Item.ItemId == change.Item.ItemId)
                         ?? previousChangeset.Changes[0];
                     var previousPath = GetPath(previousFile.Item.ServerItem);
-                    fileCommands.Add(new FileRenameCommand(previousPath!, path));
 
-                    // remove delete commands, since rename will take care of it
-                    fileCommands.RemoveAll(fc => fc is FileDeleteCommand && fc.Path == previousPath);
+                    // Issue #11: if the source path was already wiped by a deleteall or by a
+                    // parent-directory delete earlier in this same commit, git fast-import will
+                    // reject the R command ("path … not in branch"). Detect that case and fall
+                    // through to FileModifyCommand instead — content is preserved, lineage lost.
+                    bool sourceGone =
+                        fileCommands.Any(fc => fc is FileDeleteAllCommand) ||
+                        fileCommands.Any(fc => fc is FileDeleteCommand dc &&
+                            (dc.Path == previousPath ||
+                             (previousPath != null && previousPath.StartsWith(dc.Path + "/"))));
+
+                    if (!sourceGone)
+                    {
+                        fileCommands.Add(new FileRenameCommand(previousPath!, path));
+
+                        // remove delete commands, since rename will take care of it
+                        fileCommands.RemoveAll(fc => fc is FileDeleteCommand && fc.Path == previousPath);
+                    }
                 }
-                // If history.Count < 2 fall through to FileModifyCommand below:
+                // If history.Count < 2 or source is gone, fall through to FileModifyCommand below:
                 // file content is exported correctly even though rename lineage is lost.
             }
 
@@ -197,10 +215,14 @@ public class TfsChangeSet
             fileCommands: fileCommands);
         _Commits[_ChangeSet.ChangesetId] = commit;
 
-        if (deleteBranch)
-            _Branches.Remove(branch);
-        else
-            _Branches[branch] = Tuple.Create(reference.Item1, (CommitCommand?)commit);
+        // Bug C: removing a branch from _Branches after deletion causes the next changeset
+        // that touches the same path to call CreateNewBranch with a deep sub-path, creating
+        // a wrong branch and silently dropping all files in that changeset.
+        // Keep the entry so subsequent changesets resolve the branch correctly.
+        // The deletion commit's tree is already empty (from deleteall above), so new files
+        // added in the next changeset will be layered onto an empty tree — which is correct.
+        _ = deleteBranch; // handled by deleteall above; branch stays in _Branches
+        _Branches[branch] = Tuple.Create(reference.Item1, (CommitCommand?)commit);
 
         return commit;
     }
@@ -238,10 +260,13 @@ public class TfsChangeSet
 
     private Tuple<string, Tuple<string, CommitCommand?>>? GetBranch(string serverPath)
     {
+        // Bug B: return the longest matching prefix so that a nested branch like
+        // "$/Root/Sub/" takes priority over "$/Root/" when both are registered.
+        KeyValuePair<string, Tuple<string, CommitCommand?>>? best = null;
         foreach (var x in _Branches)
-            if (serverPath.StartsWith(x.Key))
-                return Tuple.Create(x.Key, x.Value);
-        return null;
+            if (serverPath.StartsWith(x.Key) && (best == null || x.Key.Length > best.Value.Key.Length))
+                best = x;
+        return best == null ? null : Tuple.Create(best.Value.Key, best.Value.Value);
     }
 
     private string? GetPath(string serverPath)
