@@ -14,6 +14,13 @@ public class FileCopyCommand : FileCommand
 
     public override void RenderCommand(Stream stream)
     {
-        stream.WriteLine($"C {Source} {Path}");
+        stream.WriteLine($"C {Quote(Source)} {Quote(Path!)}");
+    }
+
+    private static string Quote(string path)
+    {
+        if (!path.Contains(' ') && !path.Contains('"') && !path.Contains('\\'))
+            return path;
+        return "\"" + path.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
 }

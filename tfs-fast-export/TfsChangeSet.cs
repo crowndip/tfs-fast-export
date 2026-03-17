@@ -135,15 +135,18 @@ public class TfsChangeSet
                     // parent-directory delete earlier in this same commit, git fast-import will
                     // reject the R command ("path … not in branch"). Detect that case and fall
                     // through to FileModifyCommand instead — content is preserved, lineage lost.
+                    // Also skip when previousPath is null — the file's prior location is outside
+                    // the current branch scope (e.g. cross-branch rename); just add at new path.
                     bool sourceGone =
+                        previousPath == null ||
                         fileCommands.Any(fc => fc is FileDeleteAllCommand) ||
                         fileCommands.Any(fc => fc is FileDeleteCommand dc &&
                             (dc.Path == previousPath ||
-                             (previousPath != null && previousPath.StartsWith(dc.Path + "/"))));
+                             previousPath.StartsWith(dc.Path + "/")));
 
                     if (!sourceGone)
                     {
-                        fileCommands.Add(new FileRenameCommand(previousPath!, path));
+                        fileCommands.Add(new FileRenameCommand(previousPath, path));
 
                         // remove delete commands, since rename will take care of it
                         fileCommands.RemoveAll(fc => fc is FileDeleteCommand && fc.Path == previousPath);
