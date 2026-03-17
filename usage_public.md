@@ -7,25 +7,37 @@ into the `git fast-import` stream format, which Git can then load into a local r
 
 Install on the Windows 11 machine before starting:
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8) (x64)
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) (includes the .NET SDK and .NET Framework 4.7.2 build tools)
+  — or — [.NET SDK](https://dotnet.microsoft.com/download) + [.NET Framework 4.7.2 Developer Pack](https://dotnet.microsoft.com/download/dotnet-framework/net472) if building without Visual Studio
 - [Git for Windows](https://git-scm.com/download/win)
 - A TFS account with **read access** to the target project (domain account or local TFS account)
 
+The tool targets **.NET Framework 4.7.2**, which ships built-in with Windows 10 and 11 — no
+runtime installation is needed on the machine that runs the export.
+
 ---
 
-## Step 1 — Build the tool
+## Step 1 — Publish the tool
 
-Open a Command Prompt or PowerShell window in the repository root:
+Open a Developer Command Prompt (or any terminal with the .NET SDK on the PATH) in the
+repository root and run:
 
 ```cmd
-dotnet build tfs-fast-export.sln -c Release
+dotnet publish tfs-fast-export\tfs-fast-export.csproj -c Release
 ```
 
-The executable is produced at:
+This collects the executable and all required DLLs into a single output folder:
 
 ```
-tfs-fast-export\bin\Release\net8.0\tfs-fast-export.exe
+tfs-fast-export\bin\Release\net472\publish\
 ```
+
+Copy that entire folder to wherever you want to run the export from.
+The folder is self-contained — no installation step is needed on the target machine beyond
+.NET Framework 4.7.2 (already present on Windows 10/11).
+
+> **Note:** .NET Framework does not support single-file executables. The publish folder will
+> contain `tfs-fast-export.exe` alongside ~50 TFS client DLLs — keep them together.
 
 ---
 
@@ -73,7 +85,7 @@ Supply your credentials as the third argument (`DOMAIN\username`). The password 
 securely on screen so it is never stored in your command history:
 
 ```cmd
-C:\path\to\tfs-fast-export\bin\Release\net8.0\tfs-fast-export.exe ^
+C:\path\to\publish\tfs-fast-export.exe ^
     http://tfsserver:8080/tfs/Collection ^
     $/MyProject ^
     DOMAIN\username ^
