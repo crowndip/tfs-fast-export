@@ -169,7 +169,7 @@ public class TfsChangeSet
                 {
                     // Issue #9: use the specific source changeset commit rather than the
                     // branch HEAD. Fall back to branch HEAD when the source is outside scope.
-                    if (!_Commits.TryGetValue(mh.SourceItem.ChangesetId, out var sourceCommit))
+                    if (!_Commits.TryGetValue(mh.SourceItem.Item.ChangesetId, out var sourceCommit))
                     {
                         var branchInfo = GetBranch(mh.SourceItem.Item.ServerItem);
                         sourceCommit = branchInfo?.Item2.Item2;
